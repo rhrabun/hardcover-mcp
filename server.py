@@ -15,11 +15,17 @@ import urllib.request
 from mcp.server import MCPServer
 
 API = "https://api.hardcover.app/v1/graphql"
-TOKEN_PATH = os.environ.get("HARDCOVER_TOKEN_PATH", "hardcover.token")
+TOKEN_PATH = os.path.expanduser(
+    os.environ.get("HARDCOVER_TOKEN_PATH", "~/.config/hardcover/token")
+)
 
 STATUSES = {"want": 1, "reading": 2, "read": 3, "dnf": 5}
 
 mcp = MCPServer("hardcover")
+
+
+class HardcoverError(Exception):
+    """A Hardcover request failed, so a read can't masquerade as an empty result."""
 
 
 def _token() -> str:
@@ -50,15 +56,14 @@ def _gql(query: str, variables: dict | None = None):
 
 
 def _search(query: str, per_page: int = 5) -> list[dict]:
-    q = '{ search(query: %s, query_type: "Book", per_page: %d) { results } }' % (
-        json.dumps(query),
-        per_page,
+    q = (
+        "query ($q: String!, $n: Int!) {"
+        ' search(query: $q, query_type: "Book", per_page: $n) { results } }'
     )
-    res = _gql(q)
-    try:
-        hits = res["data"]["search"]["results"].get("hits", [])
-    except (KeyError, TypeError):
-        return []
+    res = _gql(q, {"q": query, "n": per_page})
+    if res.get("error") or res.get("errors") or not isinstance(res.get("data"), dict):
+        raise HardcoverError(res.get("error") or res.get("errors") or "unexpected response")
+    hits = (((res.get("data") or {}).get("search") or {}).get("results") or {}).get("hits", [])
     out = []
     for h in hits:
         d = h.get("document") or {}
@@ -133,7 +138,10 @@ def _set_finished_date(user_book_id: int, finished_at: str) -> str | None:
 
 def _ensure_user_book(title: str, year: int | None, status: str, stars: float | None):
     """Find or create the user_book. Returns (book, user_book_id, created, error)."""
-    book = _find_book(title, year)
+    try:
+        book = _find_book(title, year)
+    except HardcoverError as e:
+        return None, None, False, f"search failed: {e}"
     if not book:
         return None, None, False, f"no book matched {title!r}"
     existing = _user_book(book["book_id"])
@@ -154,7 +162,11 @@ def _ensure_user_book(title: str, year: int | None, status: str, stars: float | 
 def hardcover_search(query: str, per_page: int = 5) -> str:
     """Search Hardcover's catalogue by title or author. Unicode (e.g. Cyrillic) queries work.
     Returns candidates with book_id; use one before any write."""
-    return json.dumps({"query": query, "results": _search(query, per_page)}, indent=1, ensure_ascii=False)
+    try:
+        results = _search(query, per_page)
+    except HardcoverError as e:
+        return json.dumps({"error": "search failed", "detail": str(e)})
+    return json.dumps({"query": query, "results": results}, indent=1, ensure_ascii=False)
 
 
 @mcp.tool()
