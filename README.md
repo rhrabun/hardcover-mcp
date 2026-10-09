@@ -14,16 +14,20 @@ catalogue search and write access. Hardcover's GraphQL API is used directly.
 |------|---------|
 | `hardcover_search` | Find books by title or author; Unicode (e.g. Cyrillic) queries work |
 | `hardcover_library` | Shelf contents by status: read / reading / want / dnf (defaults to read) |
-| `hardcover_mark_read` | Mark read, with optional rating and finish date |
-| `hardcover_set_rating` | Set or change a rating (0.5-5) |
+| `hardcover_mark_read` | Mark read, with optional rating and finish date (no date = no date) |
+| `hardcover_set_rating` | Set or change a rating (0.5-5) on a book already on a shelf |
 | `hardcover_set_status` | Move a book between shelves |
 | `hardcover_stats` | Counts and the size of the missing-date gap |
 
-## Two Hardcover quirks this server hides
+## Three Hardcover quirks this server hides
 
 1. **The finished date is dropped when a read record is first created.** `mark_read` writes
-   the date in a follow-up call, which is what actually populates `last_read_date`.
-2. **Book titles are English by Hardcover's policy**, even for non-English books. Searches
+   the date in a follow-up call and reads it back, because a success response does not carry
+   the value.
+2. **Inserting a book as read stamps a read row dated Hardcover's own today.** Marking a book
+   read without a finish date deletes that row, so the book ends up read with no date instead
+   of carrying a date the caller never supplied.
+3. **Book titles are English by Hardcover's policy**, even for non-English books. Searches
    match the caller's wording, and writes report the record they matched.
 
 ## Setup
