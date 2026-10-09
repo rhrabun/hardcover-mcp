@@ -1,6 +1,7 @@
 """Live end-to-end check: starts the server over stdio and calls real tools."""
 
 import asyncio
+import os
 import sys
 from pathlib import Path
 
@@ -12,7 +13,9 @@ HERE = Path(__file__).parent
 
 async def main() -> None:
     params = StdioServerParameters(
-        command="uv", args=["run", "--directory", str(HERE), "python", "server.py"]
+        command="uv",
+        args=["run", "--directory", str(HERE), "python", "server.py"],
+        env=dict(os.environ),  # the SDK only forwards a safe allowlist by default
     )
     async with stdio_client(params) as (read, write):
         async with ClientSession(read, write) as session:
