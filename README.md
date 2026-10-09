@@ -5,8 +5,8 @@ catalogue search and write access. Hardcover's GraphQL API is used directly.
 
 ## Credentials
 
-- `HARDCOVER_TOKEN_PATH` (default `hardcover.token`) - path to a file holding the API
-  token, sent as `Authorization: Bearer <token>`.
+- `HARDCOVER_TOKEN_PATH` (default `~/.config/hardcover/token`) - path to a file holding
+  the API token, sent as `Authorization: Bearer <token>`.
 
 ## Tools
 
