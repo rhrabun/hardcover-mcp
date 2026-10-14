@@ -153,6 +153,49 @@ def test_set_rating_updates_a_book_that_is_on_a_shelf():
     assert not any("insert_user_book" in q for q in log)
 
 
+def test_state_retries_a_lagging_read_back():
+    """Hardcover's read replica can answer empty right after an insert; the retry must still see it."""
+    state = {"calls": 0}
+
+    def fake(query, variables=None):
+        if "search(query: $q" in query:
+            return CANNED
+        if "book_id: {_eq: 373525}" in query:
+            return ME([])
+        if "insert_user_book(object" in query:
+            return {"data": {"insert_user_book": {"id": 42, "error": None}}}
+        if "update_user_book(id" in query:
+            return {"data": {"update_user_book": {"id": 42, "error": None}}}
+        if "status_id rating last_read_date" in query:
+            state["calls"] += 1
+            if state["calls"] == 1:
+                return ME([])
+            return ME([{"status_id": 1, "rating": None, "last_read_date": None, "user_book_reads": []}])
+        raise AssertionError(f"unscripted query: {query}")
+
+    server._gql = fake
+    out = json.loads(server.hardcover_set_status("It", "want"))
+    assert state["calls"] == 2
+    assert out["ok"] is True and out["final_state"]["status_id"] == 1
+
+
+def test_a_read_that_never_lands_reports_an_error_not_an_ok():
+    def fake(query, variables=None):
+        if "search(query: $q" in query:
+            return CANNED
+        if "book_id: {_eq: 373525}" in query:
+            return ME([{"id": 42, "status_id": 3, "rating": None}])
+        if "update_user_book(id" in query:
+            return {"data": {"update_user_book": {"id": 42, "error": None}}}
+        if "status_id rating last_read_date" in query:
+            return ME([])
+        raise AssertionError(f"unscripted query: {query}")
+
+    server._gql = fake
+    out = json.loads(server.hardcover_set_rating("It", 4.5))
+    assert out["ok"] is False and out["rating"] is None
+
+
 def test_set_rating_refuses_a_book_that_is_not_on_a_shelf():
     fake, log = _scripted(
         [
