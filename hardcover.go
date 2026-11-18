@@ -26,6 +26,9 @@ import (
 const (
 	apiURL    = "https://api.hardcover.app/v1/graphql"
 	userAgent = "hardcover-mcp/0.1"
+
+	// Hardcover's read replica can lag a fresh insert; one retry covers it.
+	defaultReadBackDelay = 1500 * time.Millisecond
 )
 
 var statusIDs = map[string]int{
@@ -41,6 +44,9 @@ type Client struct {
 	// Do sends one GraphQL request and returns the raw response body.
 	// Tests replace it.
 	Do func(ctx context.Context, query string, vars map[string]any) ([]byte, error)
+
+	// readBackDelay is how long to wait before retrying a verification read.
+	readBackDelay time.Duration
 }
 
 func NewClient() (*Client, error) {
@@ -48,7 +54,7 @@ func NewClient() (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	c := &Client{TokenPath: path}
+	c := &Client{TokenPath: path, readBackDelay: defaultReadBackDelay}
 	c.Do = c.post
 	return c, nil
 }
@@ -143,13 +149,55 @@ func (c *Client) meRows(ctx context.Context, query string, out any) error {
 	if err := c.gql(ctx, query, nil, &env); err != nil {
 		return err
 	}
-	if len(env.Me) == 0 || len(env.Me[0].UserBooks) == 0 {
+	if len(env.Me) == 0 {
 		return fmt.Errorf("unexpected response: no account data")
 	}
-	if err := json.Unmarshal(env.Me[0].UserBooks, out); err != nil {
+	books := bytes.TrimSpace(env.Me[0].UserBooks)
+	if len(books) == 0 || string(books) == "null" {
+		return nil
+	}
+	if err := json.Unmarshal(books, out); err != nil {
 		return fmt.Errorf("unexpected response: %w", err)
 	}
 	return nil
+}
+
+// userBookRaw reads one user_book row, retrying once. Hardcover's read replica
+// can lag a fresh insert, and an empty answer then looked like a failed write.
+// A nil row with a nil error means it still could not be read.
+func (c *Client) userBookRaw(ctx context.Context, userBookID int64, fields string) (json.RawMessage, error) {
+	q := fmt.Sprintf("{ me { user_books(where: {id: {_eq: %d}}) { %s } } }", userBookID, fields)
+	var env struct {
+		Me []struct {
+			UserBooks json.RawMessage `json:"user_books"`
+		} `json:"me"`
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		if err := c.gql(ctx, q, nil, &env); err != nil {
+			return nil, err
+		}
+		if len(env.Me) == 0 {
+			return nil, fmt.Errorf("unexpected response: no account data")
+		}
+		var rows []json.RawMessage
+		books := bytes.TrimSpace(env.Me[0].UserBooks)
+		if len(books) > 0 && string(books) != "null" {
+			if err := json.Unmarshal(books, &rows); err != nil {
+				return nil, fmt.Errorf("unexpected response: %w", err)
+			}
+		}
+		if len(rows) > 0 {
+			return rows[0], nil
+		}
+		if attempt == 0 {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(c.readBackDelay):
+			}
+		}
+	}
+	return nil, nil
 }
 
 func truncate(s string, n int) string {
@@ -301,32 +349,35 @@ type readRow struct {
 
 // State is one user_book's status, rating, dates and read-row count.
 type State struct {
-	StatusID     *int      `json:"status_id" jsonschema:"shelf id: 1 want, 2 reading, 3 read, 5 did not finish"`
+	StatusID     *int      `json:"status_id" jsonschema:"shelf id: 1 want, 2 reading, 3 read, 4 paused, 5 did not finish, 6 ignored"`
 	Rating       *float64  `json:"rating" jsonschema:"rating from 0.5 to 5"`
 	LastReadDate *string   `json:"last_read_date" jsonschema:"last read date as YYYY-MM-DD"`
 	ReadRows     int       `json:"read_rows" jsonschema:"number of read records; zero means the book has no date"`
 	ReadDates    []*string `json:"read_dates" jsonschema:"finish dates of the read records"`
+	ReadError    *string   `json:"read_error,omitempty" jsonschema:"set when the book could not be read back after a write"`
 }
 
 // state reads a user_book. The row count is the fresh signal:
 // last_read_date is derived from the read rows and can still show the old
 // value in the response right after a row was deleted.
 func (c *Client) state(ctx context.Context, userBookID int64) (State, error) {
-	q := fmt.Sprintf(`{ me { user_books(where: {id: {_eq: %d}}) { status_id rating last_read_date
-  user_book_reads { id finished_at } } } }`, userBookID)
-	var rows []struct {
+	raw, err := c.userBookRaw(ctx, userBookID, "status_id rating last_read_date user_book_reads { id finished_at }")
+	if err != nil {
+		return State{}, err
+	}
+	if raw == nil {
+		message := "could not read the book back"
+		return State{ReadError: &message}, nil
+	}
+	var row struct {
 		StatusID      *int      `json:"status_id"`
 		Rating        *float64  `json:"rating"`
 		LastReadDate  *string   `json:"last_read_date"`
 		UserBookReads []readRow `json:"user_book_reads"`
 	}
-	if err := c.meRows(ctx, q, &rows); err != nil {
-		return State{}, err
+	if err := json.Unmarshal(raw, &row); err != nil {
+		return State{}, fmt.Errorf("unexpected response: %w", err)
 	}
-	if len(rows) == 0 {
-		return State{}, nil
-	}
-	row := rows[0]
 	dates := make([]*string, 0, len(row.UserBookReads))
 	for _, read := range row.UserBookReads {
 		dates = append(dates, read.FinishedAt)
@@ -341,17 +392,20 @@ func (c *Client) state(ctx context.Context, userBookID int64) (State, error) {
 }
 
 func (c *Client) readRows(ctx context.Context, userBookID int64) ([]readRow, error) {
-	q := fmt.Sprintf(`{ me { user_books(where: {id: {_eq: %d}}) { user_book_reads { id finished_at } } } }`, userBookID)
-	var rows []struct {
-		UserBookReads []readRow `json:"user_book_reads"`
-	}
-	if err := c.meRows(ctx, q, &rows); err != nil {
+	raw, err := c.userBookRaw(ctx, userBookID, "user_book_reads { id finished_at }")
+	if err != nil {
 		return nil, err
 	}
-	if len(rows) == 0 {
-		return nil, nil
+	if raw == nil {
+		return nil, fmt.Errorf("could not read the book back")
 	}
-	return rows[0].UserBookReads, nil
+	var row struct {
+		UserBookReads []readRow `json:"user_book_reads"`
+	}
+	if err := json.Unmarshal(raw, &row); err != nil {
+		return nil, fmt.Errorf("unexpected response: %w", err)
+	}
+	return row.UserBookReads, nil
 }
 
 // clearAutoReads deletes the read row insert_user_book creates by itself.

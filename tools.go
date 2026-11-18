@@ -265,9 +265,10 @@ type SetRatingInput struct {
 }
 
 type SetRatingOutput struct {
-	OK      bool     `json:"ok"`
-	Matched string   `json:"matched"`
-	Rating  *float64 `json:"rating"`
+	OK        bool     `json:"ok"`
+	Matched   string   `json:"matched"`
+	Rating    *float64 `json:"rating"`
+	ReadError *string  `json:"read_error,omitempty"`
 }
 
 func (c *Client) setRatingTool(ctx context.Context, _ *mcp.CallToolRequest, in SetRatingInput) (*mcp.CallToolResult, SetRatingOutput, error) {
@@ -297,9 +298,10 @@ func (c *Client) setRatingTool(ctx context.Context, _ *mcp.CallToolRequest, in S
 	}
 	ok := state.Rating != nil && *state.Rating == in.Stars
 	return nil, SetRatingOutput{
-		OK:      ok,
-		Matched: fmt.Sprintf("%s (%s)", book.Title, book.Author),
-		Rating:  state.Rating,
+		OK:        ok,
+		Matched:   fmt.Sprintf("%s (%s)", book.Title, book.Author),
+		Rating:    state.Rating,
+		ReadError: state.ReadError,
 	}, nil
 }
 

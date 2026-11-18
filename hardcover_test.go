@@ -194,6 +194,82 @@ func TestSetStatusReadClearsTheAutomaticDateRow(t *testing.T) {
 	}
 }
 
+func TestStateRetriesALaggingReadBack(t *testing.T) {
+	stateCalls := 0
+	c := &Client{}
+	c.Do = func(_ context.Context, query string, _ map[string]any) ([]byte, error) {
+		switch {
+		case strings.Contains(query, "search(query: $q"):
+			return []byte(canned), nil
+		case strings.Contains(query, "book_id: {_eq: 373525}"):
+			return []byte(me(`[{"id":42}]`)), nil
+		case strings.Contains(query, "update_user_book(id"):
+			return []byte(`{"data":{"update_user_book":{"id":42,"error":null}}}`), nil
+		case strings.Contains(query, "status_id rating last_read_date"):
+			stateCalls++
+			if stateCalls == 1 {
+				return []byte(meEmpty), nil
+			}
+			return []byte(me(`[{"status_id":1,"rating":null,"last_read_date":null,"user_book_reads":[]}]`)), nil
+		}
+		t.Fatalf("unscripted query: %s", query)
+		return nil, nil
+	}
+
+	_, out, err := c.setStatusTool(context.Background(), nil, SetStatusInput{Title: "It", Status: "want"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stateCalls != 2 {
+		t.Fatalf("state calls = %d", stateCalls)
+	}
+	if !out.OK || out.FinalState.StatusID == nil || *out.FinalState.StatusID != 1 {
+		t.Fatalf("out = %+v", out)
+	}
+}
+
+func TestAReadThatNeverLandsReportsReadError(t *testing.T) {
+	stateCalls := 0
+	c := &Client{}
+	c.Do = func(_ context.Context, query string, _ map[string]any) ([]byte, error) {
+		switch {
+		case strings.Contains(query, "search(query: $q"):
+			return []byte(canned), nil
+		case strings.Contains(query, "book_id: {_eq: 373525}"):
+			return []byte(me(`[{"id":42}]`)), nil
+		case strings.Contains(query, "update_user_book(id"):
+			return []byte(`{"data":{"update_user_book":{"id":42,"error":null}}}`), nil
+		case strings.Contains(query, "status_id rating last_read_date"):
+			stateCalls++
+			return []byte(meEmpty), nil
+		}
+		t.Fatalf("unscripted query: %s", query)
+		return nil, nil
+	}
+
+	_, out, err := c.setRatingTool(context.Background(), nil, SetRatingInput{Title: "It", Stars: 4.5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stateCalls != 2 {
+		t.Fatalf("state calls = %d", stateCalls)
+	}
+	if out.OK || out.Rating != nil || out.ReadError == nil {
+		t.Fatalf("out = %+v", out)
+	}
+}
+
+func TestEmptyLibraryIsNotAnError(t *testing.T) {
+	c, _ := scripted(t, rule{"status_id: {_eq: 3}", meEmpty})
+	_, out, err := c.libraryTool(context.Background(), nil, LibraryInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Count != 0 || out.Books == nil || len(out.Books) != 0 {
+		t.Fatalf("out = %+v", out)
+	}
+}
+
 func TestSetRatingUpdatesABookThatIsOnAShelf(t *testing.T) {
 	c, sent := scripted(t,
 		rule{"search(query: $q", canned},
