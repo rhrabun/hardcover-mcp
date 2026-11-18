@@ -19,7 +19,7 @@ the same six tools.
 | Tool | Purpose |
 |------|---------|
 | `hardcover_search` | Find books by title or author; Unicode (e.g. Cyrillic) queries work |
-| `hardcover_library` | Shelf contents by status: read / reading / want / dnf (defaults to read) |
+| `hardcover_library` | Shelf contents by status: read / reading / want / paused / dnf / ignored (defaults to read) |
 | `hardcover_mark_read` | Mark read, with optional rating and finish date (no date = no date) |
 | `hardcover_set_rating` | Set or change a rating (0.5-5) on a book already on a shelf |
 | `hardcover_set_status` | Move a book between shelves |
