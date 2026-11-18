@@ -11,6 +11,7 @@ Three Hardcover quirks are handled here so callers never hit them:
 
 import json
 import os
+import time
 import urllib.error
 import urllib.request
 
@@ -113,20 +114,35 @@ def _user_book(book_id: int) -> dict | None:
     return rows[0] if rows else None
 
 
+def _user_book_row(user_book_id: int, fields: str, attempts: int = 2):
+    """Read one user_book row, retrying once.
+
+    Hardcover's read replica can lag a fresh insert by a moment, and an empty answer then looked
+    like a failed write. Returns the row, or None when it still cannot be read.
+    """
+    query = "{ me { user_books(where: {id: {_eq: %d}}) { %s } } }" % (user_book_id, fields)
+    for attempt in range(attempts):
+        res = _gql(query)
+        try:
+            return res["data"]["me"][0]["user_books"][0]
+        except (KeyError, TypeError, IndexError):
+            if attempt + 1 < attempts:
+                time.sleep(1.5)
+    return None
+
+
 def _state(user_book_id: int) -> dict:
     """Status, rating, dates and the read-row count for one user_book.
 
     The row count is the fresh signal: `user_book.last_read_date` is derived from the read rows
     and can still show the old value in the response right after a row was deleted.
     """
-    res = _gql(
-        "{ me { user_books(where: {id: {_eq: %d}}) { status_id rating last_read_date first_read_date"
-        " user_book_reads { id finished_at } } } }" % user_book_id
+    row = _user_book_row(
+        user_book_id,
+        "status_id rating last_read_date first_read_date user_book_reads { id finished_at }",
     )
-    try:
-        row = res["data"]["me"][0]["user_books"][0]
-    except (KeyError, TypeError, IndexError):
-        return {}
+    if row is None:
+        return {"read_error": "could not read the book back"}
     reads = row.get("user_book_reads") or []
     return {
         "status_id": row.get("status_id"),
@@ -139,13 +155,8 @@ def _state(user_book_id: int) -> dict:
 
 def _read_row_ids(user_book_id: int):
     """Read row ids for a user_book, or None when the response can't be read."""
-    res = _gql(
-        "{ me { user_books(where: {id: {_eq: %d}}) { user_book_reads { id } } } }" % user_book_id
-    )
-    try:
-        return res["data"]["me"][0]["user_books"][0]["user_book_reads"]
-    except (KeyError, TypeError, IndexError):
-        return None
+    row = _user_book_row(user_book_id, "user_book_reads { id }")
+    return None if row is None else (row.get("user_book_reads") or [])
 
 
 def _clear_auto_reads(user_book_id: int) -> str | None:
