@@ -166,13 +166,31 @@ func (c *Client) meRows(ctx context.Context, query string, out any) error {
 // can lag a fresh insert, and an empty answer then looked like a failed write.
 // A nil row with a nil error means it still could not be read.
 func (c *Client) userBookRaw(ctx context.Context, userBookID int64, fields string) (json.RawMessage, error) {
+	return c.userBookRawWhen(ctx, userBookID, fields, nil)
+}
+
+// userBookRawWhen is userBookRaw with a usability test. The replica can also
+// serve a row whose derived value has not caught up yet, so a caller that
+// writes a field then reads it back needs the retry to fire on a stale value,
+// not only on a missing row. accept returns false to retry. When neither
+// attempt is accepted, the last row read comes back with a nil error and the
+// caller decides what to report.
+func (c *Client) userBookRawWhen(ctx context.Context, userBookID int64, fields string, accept func(json.RawMessage) bool) (json.RawMessage, error) {
 	q := fmt.Sprintf("{ me { user_books(where: {id: {_eq: %d}}) { %s } } }", userBookID, fields)
-	var env struct {
-		Me []struct {
-			UserBooks json.RawMessage `json:"user_books"`
-		} `json:"me"`
-	}
+	var last json.RawMessage
 	for attempt := 0; attempt < 2; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(c.readBackDelay):
+			}
+		}
+		var env struct {
+			Me []struct {
+				UserBooks json.RawMessage `json:"user_books"`
+			} `json:"me"`
+		}
 		if err := c.gql(ctx, q, nil, &env); err != nil {
 			return nil, err
 		}
@@ -187,17 +205,13 @@ func (c *Client) userBookRaw(ctx context.Context, userBookID int64, fields strin
 			}
 		}
 		if len(rows) > 0 {
-			return rows[0], nil
-		}
-		if attempt == 0 {
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(c.readBackDelay):
+			last = rows[0]
+			if accept == nil || accept(rows[0]) {
+				return rows[0], nil
 			}
 		}
 	}
-	return nil, nil
+	return last, nil
 }
 
 func truncate(s string, n int) string {
@@ -457,7 +471,15 @@ func (c *Client) setReadDate(ctx context.Context, userBookID int64, finishedAt s
 	if err := c.gql(ctx, q, nil, nil); err != nil {
 		return err
 	}
-	raw, err := c.userBookRaw(ctx, userBookID, "last_read_date")
+	raw, err := c.userBookRawWhen(ctx, userBookID, "last_read_date", func(candidate json.RawMessage) bool {
+		var row struct {
+			LastReadDate *string `json:"last_read_date"`
+		}
+		if err := json.Unmarshal(candidate, &row); err != nil {
+			return false
+		}
+		return row.LastReadDate != nil && *row.LastReadDate == finishedAt
+	})
 	if err != nil {
 		return fmt.Errorf("could not confirm the date after writing it: %w", err)
 	}
