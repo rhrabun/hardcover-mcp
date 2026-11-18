@@ -457,20 +457,23 @@ func (c *Client) setReadDate(ctx context.Context, userBookID int64, finishedAt s
 	if err := c.gql(ctx, q, nil, nil); err != nil {
 		return err
 	}
-	check := fmt.Sprintf("{ me { user_books(where: {id: {_eq: %d}}) { last_read_date } } }", userBookID)
-	var got []struct {
-		LastReadDate *string `json:"last_read_date"`
-	}
-	if err := c.meRows(ctx, check, &got); err != nil {
+	raw, err := c.userBookRaw(ctx, userBookID, "last_read_date")
+	if err != nil {
 		return fmt.Errorf("could not confirm the date after writing it: %w", err)
 	}
-	if len(got) == 0 {
+	if raw == nil {
 		return fmt.Errorf("could not confirm the date after writing it")
 	}
-	if got[0].LastReadDate == nil || *got[0].LastReadDate != finishedAt {
+	var row struct {
+		LastReadDate *string `json:"last_read_date"`
+	}
+	if err := json.Unmarshal(raw, &row); err != nil {
+		return fmt.Errorf("unexpected response: %w", err)
+	}
+	if row.LastReadDate == nil || *row.LastReadDate != finishedAt {
 		shown := "<nil>"
-		if got[0].LastReadDate != nil {
-			shown = *got[0].LastReadDate
+		if row.LastReadDate != nil {
+			shown = *row.LastReadDate
 		}
 		return fmt.Errorf("date did not land: the book shows %q", shown)
 	}

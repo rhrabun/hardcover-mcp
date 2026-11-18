@@ -161,6 +161,47 @@ func TestMarkReadWithADateCreatesOneReadRowAndConfirmsIt(t *testing.T) {
 	}
 }
 
+func TestDateConfirmationRetriesALaggingReadBack(t *testing.T) {
+	confirmations := 0
+	c := &Client{}
+	c.Do = func(_ context.Context, query string, _ map[string]any) ([]byte, error) {
+		switch {
+		case strings.Contains(query, "search(query: $q"):
+			return []byte(canned), nil
+		case strings.Contains(query, "book_id: {_eq: 373525}"):
+			return []byte(me(`[{"id":42}]`)), nil
+		case strings.Contains(query, "update_user_book(id"):
+			return []byte(`{"data":{"update_user_book":{"id":42,"error":null}}}`), nil
+		case strings.Contains(query, "status_id rating last_read_date"):
+			return []byte(me(`[{"status_id":3,"rating":null,"last_read_date":"2026-09-10","user_book_reads":[{"id":9,"finished_at":"2026-09-10"}]}]`)), nil
+		case strings.Contains(query, "user_book_reads { id finished_at }"):
+			return []byte(me(`[{"user_book_reads":[]}]`)), nil
+		case strings.Contains(query, "insert_user_book_read"):
+			return []byte(`{"data":{"insert_user_book_read":{"id":9}}}`), nil
+		case strings.Contains(query, "user_books(where: {id: {_eq: 42}}) { last_read_date }"):
+			confirmations++
+			if confirmations == 1 {
+				return []byte(meEmpty), nil
+			}
+			return []byte(me(`[{"last_read_date":"2026-09-10"}]`)), nil
+		}
+		t.Fatalf("unscripted query: %s", query)
+		return nil, nil
+	}
+
+	date := "2026-09-10"
+	_, out, err := c.markReadTool(context.Background(), nil, MarkReadInput{Title: "It", FinishedAt: &date})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if confirmations != 2 {
+		t.Fatalf("confirmations = %d", confirmations)
+	}
+	if !out.OK || out.DateError != nil {
+		t.Fatalf("out = %+v", out)
+	}
+}
+
 func TestMarkReadRejectsAMalformedDate(t *testing.T) {
 	c, sent := scripted(t)
 	date := "10/09/2026"
