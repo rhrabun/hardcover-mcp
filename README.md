@@ -4,9 +4,7 @@ An MCP server that exposes a Hardcover library to an agent: read books, ratings,
 catalogue search and write access. Hardcover's GraphQL API is used directly.
 
 The server is written in Go with the
-[official MCP Go SDK](https://github.com/modelcontextprotocol/go-sdk). The original
-Python implementation is kept in [`python/`](python/) as a reference; both expose
-the same six tools.
+[official MCP Go SDK](https://github.com/modelcontextprotocol/go-sdk).
 
 ## Credentials
 
@@ -57,33 +55,6 @@ go run ./cmd/smoke            # live end-to-end check over stdio, run from the r
     "hardcover": {
       "command": "/path/to/hardcover-mcp",
       "args": [],
-      "env": { "HARDCOVER_TOKEN_PATH": "/path/to/hardcover.token" }
-    }
-  }
-}
-```
-
-## Python reference
-
-`python/` holds the previous implementation, same tools and behaviour.
-
-Requires [uv](https://docs.astral.sh/uv/).
-
-```sh
-cd python
-uv sync
-uv run python test_server.py   # self-check on the pure helpers
-uv run python smoke.py         # live end-to-end check over stdio
-```
-
-To register it instead:
-
-```json
-{
-  "mcpServers": {
-    "hardcover": {
-      "command": "uv",
-      "args": ["run", "--directory", "/path/to/hardcover-mcp/python", "python", "server.py"],
       "env": { "HARDCOVER_TOKEN_PATH": "/path/to/hardcover.token" }
     }
   }
